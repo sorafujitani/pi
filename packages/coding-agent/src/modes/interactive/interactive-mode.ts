@@ -359,8 +359,6 @@ export interface InteractiveModeOptions {
 	terminal?: Terminal;
 	/** Draft state captured by the startup composer. */
 	initialEditorState?: EditorState;
-	/** Editor factory used by the startup composer, applied before the first interactive render. */
-	initialEditorComponentFactory?: EditorFactory;
 }
 
 interface InteractiveTuiOptions {
@@ -401,7 +399,6 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 	return new Proxy({} as TUI, {
 		get: (_target, property) => {
 			const tui = getTui();
-			// pi-lens-ignore: ast-grep:no-reflect-get
 			const value = Reflect.get(tui, property, tui);
 			if (typeof value !== "function") return value;
 			let methodTui = tui;
@@ -409,7 +406,6 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 			return (...args: unknown[]) => {
 				const currentTui = getTui();
 				if (currentTui !== methodTui) {
-					// pi-lens-ignore: ast-grep:no-reflect-get
 					const currentMethod = Reflect.get(currentTui, property, currentTui);
 					if (typeof currentMethod !== "function") {
 						throw new TypeError(`TUI property ${String(property)} is not callable`);
@@ -417,7 +413,6 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 					methodTui = currentTui;
 					method = currentMethod;
 				}
-				// pi-lens-ignore: ast-grep:no-reflect-apply
 				return Reflect.apply(method, methodTui, args);
 			};
 		},
@@ -965,9 +960,6 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onSubmit = (text) => this.handleStartupSubmit(text);
-		if (this.options.initialEditorComponentFactory) {
-			this.setCustomEditorComponent(this.options.initialEditorComponentFactory);
-		}
 		// Do not let Enter clear or submit the draft while managed tools are loading.
 		// The submit handler is installed only after startup completes, so the
 		// editor's cursor and paste registry remain intact during this phase.
@@ -1202,7 +1194,6 @@ export class InteractiveMode {
 		}
 
 		// Main interactive loop
-		// pi-lens-ignore: infinite-loop
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
@@ -2739,7 +2730,6 @@ export class InteractiveMode {
 
 			// If extending CustomEditor, copy app-level handlers
 			// Use duck typing since instanceof fails across jiti module boundaries
-			// pi-lens-ignore: ast-grep:require-safety-comment-for-as-unknown-as
 			const customEditor = newEditor as unknown as Record<string, unknown>;
 			if ("actionHandlers" in customEditor && customEditor.actionHandlers instanceof Map) {
 				if (!customEditor.onEscape) {

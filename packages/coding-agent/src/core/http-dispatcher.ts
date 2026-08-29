@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
-import { createRequire } from "node:module";
-import type * as Undici from "undici";
+import * as undici from "undici";
 
 export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
 // Node's 250ms default can terminate valid connection attempts on high-latency routes.
@@ -14,19 +13,8 @@ export const HTTP_IDLE_TIMEOUT_CHOICES = [
 	{ label: "disabled", timeoutMs: 0 },
 ] as const;
 
-const require = createRequire(import.meta.url);
 const originalGlobalFetch = globalThis.fetch;
 let installedGlobalFetch: typeof globalThis.fetch | undefined;
-let lazyGlobalFetch: typeof globalThis.fetch | undefined;
-let pendingTimeoutMs: number | undefined;
-let undiciModule: typeof Undici | undefined;
-
-// undici is ~700KB of JavaScript that no startup path needs before the first
-// request, so it is loaded on the first fetch rather than at import time.
-function loadUndici(): typeof Undici {
-	undiciModule ??= require("undici") as typeof Undici;
-	return undiciModule;
-}
 
 export function parseHttpIdleTimeoutMs(value: unknown): number | undefined {
 	if (typeof value === "string") {
@@ -66,21 +54,19 @@ const ignoreUndiciDispatcherError = (_error: unknown): void => {};
 // Undici can emit an internal Client "error" while terminating a mid-stream
 // fetch body. The body stream still rejects through reader.read(); this listener
 // only prevents EventEmitter's unhandled "error" special case from crashing pi.
-function withUndiciErrorListener<T extends Undici.Dispatcher>(dispatcher: T): T {
+function withUndiciErrorListener<T extends undici.Dispatcher>(dispatcher: T): T {
 	if (dispatcher instanceof EventEmitter) {
 		EventEmitter.prototype.on.call(dispatcher, "error", ignoreUndiciDispatcherError);
 	}
 	return dispatcher;
 }
 
-function createUndiciClient(origin: string | URL, options: object): Undici.Dispatcher {
-	const undici = loadUndici();
-	return withUndiciErrorListener(new undici.Client(origin, options as Undici.Client.Options));
+function createUndiciClient(origin: string | URL, options: object): undici.Dispatcher {
+	return withUndiciErrorListener(new undici.Client(origin, options as undici.Client.Options));
 }
 
-function createUndiciOriginDispatcher(origin: string | URL, options: object): Undici.Dispatcher {
-	const undici = loadUndici();
-	const dispatcherOptions = options as Undici.Pool.Options;
+function createUndiciOriginDispatcher(origin: string | URL, options: object): undici.Dispatcher {
+	const dispatcherOptions = options as undici.Pool.Options;
 	if (dispatcherOptions.connections === 1) {
 		return createUndiciClient(origin, dispatcherOptions);
 	}
@@ -92,20 +78,19 @@ function createUndiciOriginDispatcher(origin: string | URL, options: object): Un
 	);
 }
 
-function isPiManagedFetch(fetchImpl: typeof globalThis.fetch): boolean {
-	return fetchImpl === originalGlobalFetch || fetchImpl === installedGlobalFetch || fetchImpl === lazyGlobalFetch;
-}
-
-function applyHttpDispatcher(timeoutMs: number): void {
-	const undici = loadUndici();
+export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
+	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
+	if (normalizedTimeoutMs === undefined) {
+		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
+	}
 	const dispatcher = withUndiciErrorListener(
 		new undici.EnvHttpProxyAgent({
 			allowH2: false,
-			bodyTimeout: timeoutMs,
+			bodyTimeout: normalizedTimeoutMs,
 			connect: {
 				autoSelectFamilyAttemptTimeout: DEFAULT_AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS,
 			},
-			headersTimeout: timeoutMs,
+			headersTimeout: normalizedTimeoutMs,
 			clientFactory: createUndiciClient,
 			factory: createUndiciOriginDispatcher,
 		}),
@@ -115,48 +100,12 @@ function applyHttpDispatcher(timeoutMs: number): void {
 	// bundled fetch can otherwise consume compressed responses through npm undici's
 	// dispatcher without decompressing them, causing response.json() failures.
 	// If a caller replaced fetch after module load, preserve that deliberate override.
-	if (isPiManagedFetch(globalThis.fetch)) {
+	const shouldInstallGlobals =
+		installedGlobalFetch === undefined
+			? globalThis.fetch === originalGlobalFetch
+			: globalThis.fetch === installedGlobalFetch;
+	if (shouldInstallGlobals) {
 		undici.install?.();
 		installedGlobalFetch = globalThis.fetch;
-		if (installedGlobalFetch === lazyGlobalFetch) {
-			installedGlobalFetch = originalGlobalFetch;
-			globalThis.fetch = originalGlobalFetch;
-		}
 	}
-	pendingTimeoutMs = undefined;
-}
-
-/**
- * Loads undici and applies the configured dispatcher now instead of on the first fetch.
- */
-export function loadHttpDispatcher(): void {
-	if (pendingTimeoutMs !== undefined) {
-		applyHttpDispatcher(pendingTimeoutMs);
-	}
-}
-
-function installLazyGlobalFetch(): void {
-	if (globalThis.fetch === lazyGlobalFetch) {
-		return;
-	}
-	lazyGlobalFetch = (input, init) => {
-		loadHttpDispatcher();
-		return globalThis.fetch(input, init);
-	};
-	globalThis.fetch = lazyGlobalFetch;
-}
-
-export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
-	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
-	if (normalizedTimeoutMs === undefined) {
-		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
-	}
-	pendingTimeoutMs = normalizedTimeoutMs;
-	// A host that replaced fetch never routes through the lazy wrapper, so the
-	// dispatcher has to be installed immediately for its requests to see it.
-	if (undiciModule !== undefined || !isPiManagedFetch(globalThis.fetch)) {
-		applyHttpDispatcher(normalizedTimeoutMs);
-		return;
-	}
-	installLazyGlobalFetch();
 }

@@ -18,8 +18,6 @@ const banner = {
 const allowedExternalPackages = new Set([
 	"@silvia-odwyer/photon-node",
 	"jiti",
-	// Loaded on the first fetch; keeping it out of the startup chunk saves ~700KB of parsing.
-	"undici",
 	// Optional native accelerators. Their callers fall back to JavaScript when absent.
 	"bufferutil",
 	"utf-8-validate",
@@ -81,7 +79,7 @@ function commonBuildOptions() {
 		banner,
 		bundle: true,
 		define: { PI_BUNDLED_NODE: "true" },
-		external: ["@silvia-odwyer/photon-node", "undici"],
+		external: ["@silvia-odwyer/photon-node"],
 		format: "esm",
 		legalComments: "none",
 		logLevel: "warning",

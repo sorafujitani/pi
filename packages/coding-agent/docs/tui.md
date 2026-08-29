@@ -20,7 +20,7 @@ interface Component {
 ```
 
 | Method | Description |
-| -------- | ------------- |
+|--------|-------------|
 | `render(width)` | Return array of strings (one per line). Each line **must not exceed `width`**. |
 | `handleInput?(data)` | Receive keyboard input when component has focus. |
 | `wantsKeyRelease?` | If true, component receives key release events (Kitty protocol). Default: false. |
@@ -47,7 +47,6 @@ class MyInput implements Component, Focusable {
 ```
 
 When a `Focusable` component has focus, TUI:
-
 1. Sets `focused = true` on the component
 2. Scans rendered output for `CURSOR_MARKER` (a zero-width APC escape sequence)
 3. Positions the hardware terminal cursor at that location
@@ -303,7 +302,6 @@ handleInput(data: string) {
 ```
 
 **Key identifiers** (use `Key.*` for autocomplete, or string literals):
-
 - Basic keys: `Key.enter`, `Key.escape`, `Key.tab`, `Key.space`, `Key.backspace`, `Key.delete`, `Key.home`, `Key.end`
 - Arrow keys: `Key.up`, `Key.down`, `Key.left`, `Key.right`
 - With modifiers: `Key.ctrl("c")`, `Key.shift("tab")`, `Key.alt("left")`, `Key.ctrlShift("p")`
@@ -323,7 +321,6 @@ render(width: number): string[] {
 ```
 
 Utilities:
-
 - `visibleWidth(str)` - Get display width (ignores ANSI codes)
 - `truncateToWidth(str, width, ellipsis?)` - Truncate with optional ellipsis
 - `wrapTextWithAnsi(str, width)` - Word wrap preserving ANSI codes
@@ -433,7 +430,7 @@ renderResult(result, options, theme, context) {
 **Foreground colors** (`theme.fg(color, text)`):
 
 | Category | Colors |
-| ---------- | -------- |
+|----------|--------|
 | General | `text`, `accent`, `muted`, `dim`, `searchMatchText` |
 | Status | `success`, `error`, `warning` |
 | Borders | `border`, `borderAccent`, `borderMuted` |
@@ -902,13 +899,11 @@ class VimEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI) {
-  // Reuse one factory so the startup composer and live session have the same editor.
-  const editorFactory = (tui, theme, keybindings) =>
-    new VimEditor(tui, theme, keybindings);
-
-  pi.registerStartupEditor(editorFactory);
   pi.on("session_start", (_event, ctx) => {
-    ctx.ui.setEditorComponent(editorFactory);
+    // Factory receives the TUI, theme, and keybindings from the app
+    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+      new VimEditor(tui, theme, keybindings)
+    );
   });
 }
 ```
@@ -918,7 +913,6 @@ export default function (pi: ExtensionAPI) {
 - **Extend `CustomEditor`** (not base `Editor`) to get app keybindings (escape to abort, ctrl+d to exit, model switching, etc.)
 - **Call `super.handleInput(data)`** for keys you don't handle
 - **Factory pattern**: `setEditorComponent` receives a factory function that gets `tui`, `theme`, and `keybindings`
-- **Startup composer**: call `pi.registerStartupEditor(factory)` during extension registration to use the same editor during startup. Set `startupComposerWaitForExtensions: true` to prevent the default editor from rendering while extensions load; otherwise Pi keeps the immediate default composer and swaps when registration completes. The factory must not depend on `session_start` context because the session is still loading. Its `theme` argument is `EditorTheme`, not the full `ctx.ui.theme`; defer metadata that needs the full extension theme until `session_start`.
 - **Pass `undefined`** to restore the default editor: `ctx.ui.setEditorComponent(undefined)`
 
 **Examples:** [modal-editor.ts](../examples/extensions/modal-editor.ts)

@@ -49,7 +49,7 @@ import {
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
-import type { EditorFactory, InlineExtension } from "./core/extensions/types.ts";
+import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
@@ -787,16 +787,6 @@ export async function main(args: string[], options?: MainOptions) {
 			},
 		});
 		const { settingsManager, modelRuntime, resourceLoader } = services;
-		if (isInitialRuntime && startupComposer && !startupCancellation.value) {
-			const startupEditorFactory = resourceLoader
-				.getExtensions()
-				.extensions.reduce<EditorFactory | undefined>(
-					(factory, extension) => extension.startupEditorFactory ?? factory,
-					undefined,
-				);
-			startupComposer.setEditorComponent(startupEditorFactory);
-			startupComposer.start();
-		}
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...projectTrustDiagnostics,
 			...services.diagnostics,
@@ -862,15 +852,11 @@ export async function main(args: string[], options?: MainOptions) {
 	time("createRuntime");
 
 	const shouldStartStartupComposer = appMode === "interactive" && !isPlainRuntimeMetadataCommand(parsed);
-	const waitForStartupExtensions =
-		(startupSettingsManager.getGlobalSettings() as { startupComposerWaitForExtensions?: boolean })
-			.startupComposerWaitForExtensions ?? false;
 	if (shouldStartStartupComposer) {
 		startupCancellationPromise = new Promise<void>((resolve) => {
 			resolveStartupCancellation = resolve;
 		});
 		startupComposer = createStartupComposer(startupSettingsManager, {
-			autoStart: !waitForStartupExtensions,
 			onCancel: () => {
 				startupCancellation.value = true;
 				startupComposer?.stop();
@@ -911,7 +897,6 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createAgentSessionRuntime");
 	const initialEditorState = startupComposer?.getState();
-	const initialEditorComponentFactory = startupComposer?.getEditorComponent();
 	startupComposer?.stop();
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
@@ -1011,7 +996,6 @@ export async function main(args: string[], options?: MainOptions) {
 			initialThemeSetting: parsed.useTheme,
 			terminal: startupComposer?.terminal,
 			initialEditorState,
-			initialEditorComponentFactory,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();

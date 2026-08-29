@@ -2,7 +2,7 @@ import net from "node:net";
 import tls from "node:tls";
 import * as undici from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyHttpProxySettings, configureHttpDispatcher, loadHttpDispatcher } from "../src/core/http-dispatcher.ts";
+import { applyHttpProxySettings, configureHttpDispatcher } from "../src/core/http-dispatcher.ts";
 
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
 const DISPATCHER_PROXY_ENV_KEYS = [...PROXY_ENV_KEYS, "http_proxy", "https_proxy"] as const;
@@ -87,28 +87,6 @@ describe("http dispatcher", () => {
 		}
 		globalThis.fetch = originalFetch;
 		vi.restoreAllMocks();
-	});
-
-	it("defers dispatcher installation until the first fetch", async () => {
-		const before = undici.getGlobalDispatcher();
-
-		configureHttpDispatcher();
-
-		expect(undici.getGlobalDispatcher()).toBe(before);
-		expect(globalThis.fetch).not.toBe(originalFetch);
-		await expect(globalThis.fetch("https://example.invalid")).rejects.toThrow();
-		expect(undici.getGlobalDispatcher()).not.toBe(before);
-		expect(globalThis.fetch).toBe(undici.fetch);
-	});
-
-	it("reconfigures immediately once the dispatcher is loaded", () => {
-		configureHttpDispatcher();
-		loadHttpDispatcher();
-		const loaded = undici.getGlobalDispatcher();
-
-		configureHttpDispatcher(30_000);
-
-		expect(undici.getGlobalDispatcher()).not.toBe(loaded);
 	});
 
 	it("allows two seconds for HTTPS connection attempts without changing the Node default", async () => {
