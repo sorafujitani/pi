@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { isBuiltin } from "node:module";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire, isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -12,6 +12,46 @@ const codingAgentDir = join(repoRoot, "packages", "coding-agent");
 const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
 const bundleDir = join(codingAgentDistDir, "bundle");
+const require = createRequire(import.meta.url);
+
+// Entry files emitted for the native extension loader. Extensions import these
+// packages as bare specifiers; the loader's resolve hook maps each specifier to
+// the matching bundle entry so native imports share the runtime's live module
+// instances. Keys are esbuild entry names, values are the entry sources.
+const virtualModuleEntryPoints = {
+	"pi-agent-core": join(repoRoot, "packages", "agent", "dist", "index.js"),
+	"pi-ai-compat": join(aiDistDir, "compat.js"),
+	"pi-ai-oauth": join(aiDistDir, "oauth.js"),
+	"pi-ai-providers-all": join(aiDistDir, "providers", "all.js"),
+	"pi-tui": join(repoRoot, "packages", "tui", "dist", "index.js"),
+	typebox: require.resolve("typebox"),
+	"typebox-compile": require.resolve("typebox/compile"),
+	"typebox-value": require.resolve("typebox/value"),
+};
+
+// Specifier -> entry name. Mirrors VIRTUAL_MODULES in
+// packages/coding-agent/src/core/extensions/loader.ts.
+const virtualModuleSpecifiers = {
+	typebox: "typebox",
+	"typebox/compile": "typebox-compile",
+	"typebox/value": "typebox-value",
+	"@sinclair/typebox": "typebox",
+	"@sinclair/typebox/compile": "typebox-compile",
+	"@sinclair/typebox/value": "typebox-value",
+	"@earendil-works/pi-agent-core": "pi-agent-core",
+	"@earendil-works/pi-tui": "pi-tui",
+	"@earendil-works/pi-ai": "pi-ai-compat",
+	"@earendil-works/pi-ai/compat": "pi-ai-compat",
+	"@earendil-works/pi-ai/oauth": "pi-ai-oauth",
+	"@earendil-works/pi-ai/providers/all": "pi-ai-providers-all",
+	"@earendil-works/pi-coding-agent": "index",
+	"@mariozechner/pi-agent-core": "pi-agent-core",
+	"@mariozechner/pi-tui": "pi-tui",
+	"@mariozechner/pi-ai": "pi-ai-compat",
+	"@mariozechner/pi-ai/compat": "pi-ai-compat",
+	"@mariozechner/pi-ai/oauth": "pi-ai-oauth",
+	"@mariozechner/pi-ai/providers/all": "pi-ai-providers-all",
+};
 const banner = {
 	js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
 };
@@ -162,6 +202,7 @@ const mainResult = await build({
 		client: join(codingAgentDistDir, "client", "index.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
+		...virtualModuleEntryPoints,
 	},
 	outdir: bundleDir,
 	chunkNames: "chunks/[name]-[hash]",
@@ -174,6 +215,21 @@ const imageResizeOutput = findContainingOutput(mainResult.metafile, "packages/co
 if (dirname(bedrockLoaderOutput) !== dirname(oauthLoaderOutput)) {
 	throw new Error("Bedrock and OAuth lazy loaders were emitted into different directories");
 }
+
+// The native extension loader reads this manifest relative to its own chunk
+// to map bare virtual-module specifiers onto bundle entries.
+const nativeLoaderOutput = findContainingOutput(
+	mainResult.metafile,
+	"packages/coding-agent/dist/core/extensions/native-loader.js",
+);
+const virtualModuleManifest = {};
+for (const [specifier, entryName] of Object.entries(virtualModuleSpecifiers)) {
+	virtualModuleManifest[specifier] = relative(dirname(nativeLoaderOutput), join(bundleDir, `${entryName}.js`)).replaceAll(
+		"\\",
+		"/",
+	);
+}
+writeFileSync(join(dirname(nativeLoaderOutput), "virtual-modules.json"), JSON.stringify(virtualModuleManifest, null, "\t"));
 
 // These implementations are reached through variable-specifier imports or a
 // worker URL, so the main bundle cannot follow them. Emit one self-contained

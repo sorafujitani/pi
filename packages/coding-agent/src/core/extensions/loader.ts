@@ -32,6 +32,7 @@ import { execCommand } from "../exec.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
+import { tryImportExtensionNatively } from "./native-loader.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -497,6 +498,26 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		const cachedFactory = extensionCache.get(extensionPath);
 		if (cachedFactory) {
 			return cachedFactory;
+		}
+	}
+
+	// The bundled Node distribution ships a virtual-modules manifest that lets
+	// Node import extensions natively (shared module instances, V8 compile
+	// cache). Anything the native loader cannot handle (non-erasable TypeScript
+	// syntax, exotic resolution) falls through to jiti.
+	if (isBundledNode && !isBunBinary && !isNodeSeaBinary) {
+		const nativeModule = (await tryImportExtensionNatively(extensionPath, extensionCacheGeneration)) as
+			| { default?: unknown }
+			| undefined;
+		if (nativeModule) {
+			const factory = (nativeModule.default ?? nativeModule) as ExtensionFactory;
+			if (typeof factory !== "function") {
+				return undefined;
+			}
+			if (isCurrentCacheToken(cacheToken)) {
+				extensionCache.set(extensionPath, factory);
+			}
+			return factory;
 		}
 	}
 
