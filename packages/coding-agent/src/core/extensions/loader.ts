@@ -504,16 +504,26 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 	// The bundled Node distribution ships a virtual-modules manifest that lets
 	// Node import extensions natively (shared module instances, V8 compile
 	// cache). Anything the native loader cannot handle (non-erasable TypeScript
-	// syntax, exotic resolution) falls through to jiti.
-	if (isBundledNode && !isBunBinary && !isNodeSeaBinary) {
-		const nativeModule = (await tryImportExtensionNatively(extensionPath, extensionCacheGeneration)) as
-			| { default?: unknown }
-			| undefined;
-		if (nativeModule) {
-			const factory = (nativeModule.default ?? nativeModule) as ExtensionFactory;
-			if (typeof factory !== "function") {
-				return undefined;
-			}
+	// syntax, exotic resolution) falls through to jiti. The native path is
+	// first-load only: Node's permanent module registry cannot re-evaluate
+	// modules, so after clearExtensionCache() (reloads, cwd changes) and for
+	// uncached loads, jiti's re-evaluate-per-call semantics take over.
+	if (isBundledNode && !isBunBinary && !isNodeSeaBinary && cacheToken !== undefined && cacheToken.generation === 0) {
+		const nativeModule = (await tryImportExtensionNatively(extensionPath)) as { default?: unknown } | undefined;
+		let nativeDefault: unknown = nativeModule?.default ?? nativeModule;
+		// Node's CJS interop exposes module.exports as `default` without
+		// honoring __esModule; unwrap the compiled-CJS default-export shape the
+		// way jiti's interopDefault does instead of re-evaluating through jiti.
+		if (
+			typeof nativeDefault === "object" &&
+			nativeDefault !== null &&
+			"__esModule" in nativeDefault &&
+			"default" in nativeDefault
+		) {
+			nativeDefault = nativeDefault.default;
+		}
+		const factory = nativeDefault as ExtensionFactory | undefined;
+		if (typeof factory === "function") {
 			if (isCurrentCacheToken(cacheToken)) {
 				extensionCache.set(extensionPath, factory);
 			}

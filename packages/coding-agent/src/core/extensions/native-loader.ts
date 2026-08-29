@@ -6,7 +6,7 @@
  * cache. Module customization hooks let Node import extensions natively
  * instead: bare imports of bundled pi packages resolve to the bundle's own
  * entry files (sharing live module instances with the runtime), TypeScript
- * installed under node_modules is fed through Node's built-in type stripping,
+ * installed under node_modules is stripped explicitly with an on-disk cache,
  * and the compile cache applies to every extension module.
  *
  * The loader activates only when the bundle ships a virtual-modules.json
@@ -17,36 +17,65 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as nodeModule from "node:module";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getAgentDir } from "../../config.ts";
-
-/**
- * Query parameter that busts Node's module registry when extensions are
- * reloaded. jiti re-evaluates modules on every import; the native registry
- * caches forever, so reloads need fresh URLs.
- */
-const GENERATION_PARAM = "pi-extension-generation";
 
 /** Specifier -> resolved URL of the bundle entry. null = unavailable. */
 let virtualModuleUrls: Map<string, string> | null | undefined;
+
+/** Directory -> nearest package.json "type" value ("none" = no field). */
+const packageTypeCache = new Map<string, "module" | "commonjs" | "none">();
+
+function nearestPackageType(startDir: string): "module" | "commonjs" | "none" {
+	const visited: string[] = [];
+	let result: "module" | "commonjs" | "none" = "none";
+	let dir = startDir;
+	while (true) {
+		const cached = packageTypeCache.get(dir);
+		if (cached !== undefined) {
+			result = cached;
+			break;
+		}
+		visited.push(dir);
+		try {
+			const manifest = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { type?: unknown };
+			result = manifest.type === "module" ? "module" : manifest.type === "commonjs" ? "commonjs" : "none";
+			break;
+		} catch {}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	for (const visitedDir of visited) {
+		packageTypeCache.set(visitedDir, result);
+	}
+	return result;
+}
 
 function ensureHooksRegistered(): boolean {
 	if (virtualModuleUrls !== undefined) return virtualModuleUrls !== null;
 	virtualModuleUrls = null;
 	if (typeof nodeModule.registerHooks !== "function") return false;
 
-	let manifest: Record<string, string>;
+	// Any failure here (missing or malformed manifest, hook registration on an
+	// unsupported runtime) must degrade to jiti, not fail extension loading.
 	try {
-		manifest = JSON.parse(fs.readFileSync(new URL("./virtual-modules.json", import.meta.url), "utf8"));
+		const manifest = JSON.parse(
+			fs.readFileSync(new URL("./virtual-modules.json", import.meta.url), "utf8"),
+		) as Record<string, string>;
+		const urls = new Map<string, string>();
+		for (const [specifier, relativePath] of Object.entries(manifest)) {
+			urls.set(specifier, new URL(relativePath, import.meta.url).href);
+		}
+		registerExtensionHooks(urls);
+		virtualModuleUrls = urls;
+		return true;
 	} catch {
-		// Not running from a bundle that ships the manifest.
 		return false;
 	}
-	const urls = new Map<string, string>();
-	for (const [specifier, relativePath] of Object.entries(manifest)) {
-		urls.set(specifier, new URL(relativePath, import.meta.url).href);
-	}
+}
 
+function registerExtensionHooks(urls: Map<string, string>): void {
 	nodeModule.registerHooks({
 		resolve(specifier, context, nextResolve) {
 			const mapped = urls.get(specifier);
@@ -73,26 +102,10 @@ function ensureHooksRegistered(): boolean {
 				}
 				if (!resolved) throw error;
 			}
-			// Keep every local file of a reloaded extension on the reload's
-			// cache-busting query so edits to non-entry files are picked up too.
-			// node_modules dependencies stay cached: they do not change while a
-			// session is running, and fresh query URLs would re-evaluate them on
-			// every reload.
-			if (context.parentURL?.includes(GENERATION_PARAM)) {
-				const generation = new URL(context.parentURL).searchParams.get(GENERATION_PARAM);
-				if (
-					generation !== null &&
-					resolved.url.startsWith("file:") &&
-					!resolved.url.includes("/node_modules/") &&
-					!resolved.url.includes("?")
-				) {
-					resolved = { ...resolved, url: `${resolved.url}?${GENERATION_PARAM}=${generation}` };
-				}
-			}
 			// jiti tolerated JSON imports without attributes; the native loader
 			// requires `with { type: "json" }`. Supply the attribute instead of
 			// failing extensions that import their package.json.
-			if (new URL(resolved.url).pathname.endsWith(".json") && context.importAttributes?.type === undefined) {
+			if (resolved.url.endsWith(".json") && context.importAttributes?.type === undefined) {
 				resolved = { ...resolved, importAttributes: { ...context.importAttributes, type: "json" } };
 			}
 			return resolved;
@@ -114,7 +127,7 @@ function ensureHooksRegistered(): boolean {
 				const typescriptSource = fs.readFileSync(fileUrl, "utf8");
 				const cacheKey = crypto
 					.createHash("sha256")
-					.update(`${process.version}\0${pathname}\0`)
+					.update(`${process.version}\0transform\0${pathname}\0`)
 					.update(typescriptSource)
 					.digest("hex");
 				const cachePath = path.join(getAgentDir(), "cache", "native-ts", `${cacheKey}.mjs`);
@@ -125,26 +138,40 @@ function ensureHooksRegistered(): boolean {
 					source = nodeModule.stripTypeScriptTypes(typescriptSource, {
 						mode: "transform",
 						sourceMap: true,
-						sourceUrl: url,
+						// Query-free URL so the artifact is stable per file.
+						sourceUrl: fileUrl.href,
 					});
+					const tempPath = `${cachePath}.${process.pid}.tmp`;
 					try {
 						fs.mkdirSync(path.dirname(cachePath), { recursive: true });
 						// Concurrent pi processes may strip the same file; write via
 						// rename so readers never observe a partial entry.
-						const tempPath = `${cachePath}.${process.pid}.tmp`;
 						fs.writeFileSync(tempPath, source);
 						fs.renameSync(tempPath, cachePath);
 					} catch {
 						// Caching is best-effort; the stripped source is still valid.
+						fs.rmSync(tempPath, { force: true });
 					}
 				}
-				return { format: "module", source, shortCircuit: true };
+				// Honor the nearest package.json "type" like Node does for .js.
+				// Packages without one are usually ESM-authored TypeScript, so
+				// default to module unless the source shows CommonJS idioms; a
+				// misdetection throws and falls back to jiti.
+				const packageType = pathname.endsWith(".mts")
+					? "module"
+					: nearestPackageType(path.dirname(fileURLToPath(fileUrl)));
+				const format =
+					packageType === "none"
+						? /\b(?:module\.exports|exports\.[A-Za-z$_]|require\s*\()/.test(source) &&
+							!/^[ \t]*(?:import|export)\b/m.test(source)
+							? "commonjs"
+							: "module"
+						: packageType;
+				return { format, source, shortCircuit: true };
 			}
 			return nextLoad(url, context);
 		},
 	});
-	virtualModuleUrls = urls;
-	return true;
 }
 
 /**
@@ -153,10 +180,9 @@ function ensureHooksRegistered(): boolean {
  * jiti, which reproduces genuine extension errors (at the cost of re-running
  * any top-level side effects that executed before a native failure).
  */
-export async function tryImportExtensionNatively(extensionPath: string, generation: number): Promise<unknown> {
+export async function tryImportExtensionNatively(extensionPath: string): Promise<unknown> {
 	if (!ensureHooksRegistered()) return undefined;
 	const url = pathToFileURL(extensionPath);
-	if (generation > 0) url.searchParams.set(GENERATION_PARAM, String(generation));
 	try {
 		// Dynamic import is the point: the specifier is a user-installed
 		// extension path known only at runtime.

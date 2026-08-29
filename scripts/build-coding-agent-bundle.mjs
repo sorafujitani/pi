@@ -12,7 +12,9 @@ const codingAgentDir = join(repoRoot, "packages", "coding-agent");
 const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
 const bundleDir = join(codingAgentDistDir, "bundle");
-const require = createRequire(import.meta.url);
+// Anchor resolution at the coding-agent package so the emitted typebox entries
+// resolve the same instance as the bundled coding-agent sources.
+const require = createRequire(join(codingAgentDir, "package.json"));
 
 // Entry files emitted for the native extension loader. Extensions import these
 // packages as bare specifiers; the loader's resolve hook maps each specifier to
@@ -51,6 +53,7 @@ const virtualModuleSpecifiers = {
 	"@mariozechner/pi-ai/compat": "pi-ai-compat",
 	"@mariozechner/pi-ai/oauth": "pi-ai-oauth",
 	"@mariozechner/pi-ai/providers/all": "pi-ai-providers-all",
+	"@mariozechner/pi-coding-agent": "index",
 };
 const banner = {
 	js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
@@ -185,6 +188,7 @@ for (const entry of [
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
 	join(aiDistDir, "api", "bedrock-converse-stream.js"),
 	join(aiDistDir, "auth", "oauth", "anthropic.js"),
+	...Object.values(virtualModuleEntryPoints),
 ]) {
 	if (!existsSync(entry)) {
 		throw new Error(`Bundle input is missing: ${relative(repoRoot, entry)}. Build the workspace packages first.`);
