@@ -502,6 +502,11 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
+		// jiti defaults its transpile cache to os.tmpdir(), which macOS purges
+		// periodically; a purge forces Babel to re-transpile every extension on
+		// the next start (seconds for large prebuilt bundles). Keep the cache
+		// under the agent dir so it survives.
+		fsCache: path.join(getAgentDir(), "cache", "jiti"),
 		// Compiled binaries and the bundled Node distribution use embedded modules.
 		// Source TypeScript reuses host modules and root tsconfig paths. Unbundled
 		// Node builds use dist aliases.
@@ -512,7 +517,18 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 				: { alias: getAliases() }),
 	});
 
-	const module = await jiti.import(extensionPath, { default: true });
+	// jiti resolves specifiers by probing candidate paths and throwing on each
+	// miss; capturing stacks for those control-flow errors costs ~10% of
+	// extension load time. Loading is sequential, so the global tweak cannot
+	// leak into unrelated errors beyond the awaited import itself.
+	const previousStackTraceLimit = Error.stackTraceLimit;
+	Error.stackTraceLimit = 0;
+	let module: unknown;
+	try {
+		module = await jiti.import(extensionPath, { default: true });
+	} finally {
+		Error.stackTraceLimit = previousStackTraceLimit;
+	}
 	const factory = module as ExtensionFactory;
 	if (typeof factory !== "function") {
 		return undefined;
