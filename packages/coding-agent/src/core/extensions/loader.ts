@@ -505,7 +505,8 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		// jiti defaults its transpile cache to os.tmpdir(), which macOS purges
 		// periodically; a purge forces Babel to re-transpile every extension on
 		// the next start (seconds for large prebuilt bundles). Keep the cache
-		// under the agent dir so it survives.
+		// under the agent dir so it survives; scheduleExtensionCachePrune()
+		// bounds its growth.
 		fsCache: path.join(getAgentDir(), "cache", "jiti"),
 		// Compiled binaries and the bundled Node distribution use embedded modules.
 		// Source TypeScript reuses host modules and root tsconfig paths. Unbundled
@@ -519,8 +520,10 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 
 	// jiti resolves specifiers by probing candidate paths and throwing on each
 	// miss; capturing stacks for those control-flow errors costs ~10% of
-	// extension load time. Loading is sequential, so the global tweak cannot
-	// leak into unrelated errors beyond the awaited import itself.
+	// extension load time. The tweak is process-global: any error constructed
+	// elsewhere while this import is pending also loses its stack. Extension
+	// loading happens at startup and on explicit reloads, so that window is
+	// accepted in exchange for the startup win.
 	const previousStackTraceLimit = Error.stackTraceLimit;
 	Error.stackTraceLimit = 0;
 	let module: unknown;
@@ -537,6 +540,39 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		extensionCache.set(extensionPath, factory);
 	}
 	return factory;
+}
+
+const CACHE_PRUNE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+let cachePruneScheduled = false;
+
+/**
+ * The transpile caches under <agentDir>/cache have no eviction of their own
+ * (jiti never prunes, and tmpdir purging no longer applies), so sweep entries
+ * that have not been touched for 30 days. Runs once per process, off the
+ * startup path.
+ */
+function scheduleExtensionCachePrune(): void {
+	if (cachePruneScheduled) return;
+	cachePruneScheduled = true;
+	const timer = setTimeout(async () => {
+		try {
+			const cacheDir = path.join(getAgentDir(), "cache");
+			const cutoff = Date.now() - CACHE_PRUNE_MAX_AGE_MS;
+			for (const subdir of await fs.promises.readdir(cacheDir)) {
+				const dirPath = path.join(cacheDir, subdir);
+				for (const entry of await fs.promises.readdir(dirPath)) {
+					const entryPath = path.join(dirPath, entry);
+					const stats = await fs.promises.stat(entryPath);
+					if (stats.isFile() && stats.mtimeMs < cutoff) {
+						await fs.promises.rm(entryPath, { force: true });
+					}
+				}
+			}
+		} catch {
+			// Cache pruning is best-effort.
+		}
+	}, 30_000);
+	timer.unref?.();
 }
 
 /**
@@ -658,6 +694,8 @@ async function loadExtensionsInternal(
 			extensions.push(extension);
 		}
 	}
+
+	scheduleExtensionCachePrune();
 
 	return {
 		extensions,
