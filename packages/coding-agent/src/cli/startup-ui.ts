@@ -1,5 +1,6 @@
 import {
 	Editor,
+	type EditorComponent,
 	type EditorOptions,
 	type EditorState,
 	getKeybindings,
@@ -14,6 +15,7 @@ import {
 import { existsSync } from "fs";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, getAgentDir, getSettingsPath, PACKAGE_NAME } from "../config.ts";
 import { areExperimentalFeaturesEnabled } from "../core/experimental.ts";
+import type { EditorFactory } from "../core/extensions/types.ts";
 import { KeybindingsManager } from "../core/keybindings.ts";
 import { DefaultPackageManager, type ResolvedResource } from "../core/package-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
@@ -56,9 +58,13 @@ export interface StartupComposerHandoff {
 }
 
 export interface StartupComposerSession extends StartupComposerHandoff {
-	readonly composer: StartupComposer;
+	readonly composer: EditorComponent;
 	readonly terminal: Terminal;
+	readonly keybindings: KeybindingsManager;
 	getState(): EditorState;
+	getEditorComponent(): EditorFactory | undefined;
+	setEditorComponent(factory: EditorFactory | undefined): void;
+	start(): void;
 	stop(options?: TuiStopOptions): void;
 	isRunning(): boolean;
 }
@@ -68,11 +74,12 @@ export interface StartupComposerSession extends StartupComposerHandoff {
  * It deliberately forwards only editing input to Editor; runtime actions are
  * handled after the normal InteractiveMode has taken over.
  */
-function captureEditorState(editor: Editor): EditorState {
+function captureEditorState(editor: EditorComponent): EditorState {
+	const text = editor.getText();
 	return (
 		editor.getState?.() ?? {
-			text: editor.getText(),
-			cursor: editor.getCursor(),
+			text,
+			cursor: { line: 0, col: text.length },
 			pasteRegistry: new Map(),
 			pasteCounter: 0,
 			pasteBuffer: "",
@@ -116,6 +123,8 @@ export class StartupComposer extends Editor {
 
 export interface StartupComposerCreateOptions extends StartupComposerOptions {
 	terminal?: Terminal;
+	autoStart?: boolean;
+	initialEditorComponentFactory?: EditorFactory;
 }
 
 export interface StartupTuiOptions {
@@ -171,11 +180,15 @@ async function loadStartupThemes(settingsManager: SettingsManager): Promise<Them
 	return loadThemes(resolvedPaths.themes);
 }
 
-function createConfiguredStartupTui(settingsManager: SettingsManager, terminal: Terminal): TUI {
+function createConfiguredStartupTui(
+	settingsManager: SettingsManager,
+	terminal: Terminal,
+	keybindings: KeybindingsManager = KeybindingsManager.create(),
+): TUI {
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
 	const terminalTheme = detectTerminalBackgroundFromEnv().theme;
 	initTheme(resolveThemeSetting(settingsManager.getThemeSetting(), terminalTheme) ?? terminalTheme);
-	setKeybindings(KeybindingsManager.create());
+	setKeybindings(keybindings);
 	const ui: TUI = new TuiMainScreen(terminal, settingsManager.getShowHardwareCursor(), getAgentDir());
 	ui.setClearOnShrink(settingsManager.getClearOnShrink());
 	return ui;
@@ -227,51 +240,100 @@ export function createStartupComposer(
 	settingsManager: SettingsManager,
 	options: StartupComposerCreateOptions = {},
 ): StartupComposerSession {
-	const { terminal: configuredTerminal, ...composerOptions } = options;
+	const {
+		terminal: configuredTerminal,
+		autoStart = true,
+		initialEditorComponentFactory,
+		...composerOptions
+	} = options;
 	const terminal = configuredTerminal ?? new ProcessTerminal();
-	const ui = createConfiguredStartupTui(settingsManager, terminal);
+	const keybindings = KeybindingsManager.create();
+	const ui = createConfiguredStartupTui(settingsManager, terminal, keybindings);
 	let running = false;
 	let paused = false;
 	let stopped = false;
 	let cancelled = false;
 	let pausedState: EditorState | undefined;
+	let editorFactory = initialEditorComponentFactory;
+	let activeEditor: EditorComponent;
 
-	const composer = new StartupComposer(ui, {
-		...composerOptions,
-		onCancel: (reason) => {
-			cancelled = true;
-			composerOptions.onCancel?.(reason);
-		},
-	});
+	const cancel = (reason: StartupComposerCancelReason) => {
+		cancelled = true;
+		composerOptions.onCancel?.(reason);
+	};
+	const createDefaultEditor = () => new StartupComposer(ui, { ...composerOptions, onCancel: cancel });
+	const createEditor = (factory: EditorFactory | undefined) =>
+		factory?.(ui, getEditorTheme(), keybindings) ?? createDefaultEditor();
+	activeEditor = createEditor(editorFactory);
 
-	ui.addChild(composer);
-	ui.setFocus(composer);
-	running = true;
-	startStartupTui(ui, settingsManager, () => running && !stopped);
-	ui.renderNow();
+	const inputListener = (data: string) => {
+		if (keybindings.matches(data, "app.interrupt")) {
+			cancel("interrupt");
+			return { consume: true };
+		}
+		if (keybindings.matches(data, "app.clear") || keybindings.matches(data, "tui.input.copy")) {
+			cancel("clear");
+			return { consume: true };
+		}
+		if (keybindings.matches(data, "app.exit") && activeEditor.getText().length === 0) {
+			cancel("exit");
+			return { consume: true };
+		}
+		if (keybindings.matches(data, "tui.input.submit")) {
+			return { consume: true };
+		}
+		return undefined;
+	};
+	const removeInputListener = ui.addInputListener(inputListener);
+
+	const mountEditor = () => {
+		ui.addChild(activeEditor);
+		ui.setFocus(activeEditor);
+	};
+	const unmountEditor = () => {
+		ui.removeChild(activeEditor);
+		ui.setFocus(null);
+	};
+	mountEditor();
 
 	const session: StartupComposerSession = {
 		ui,
-		composer,
+		get composer() {
+			return activeEditor;
+		},
 		terminal,
-		getState: () => captureEditorState(composer),
+		keybindings,
+		getState: () => captureEditorState(activeEditor),
+		getEditorComponent: () => editorFactory,
+		setEditorComponent: (factory) => {
+			const state = captureEditorState(activeEditor);
+			unmountEditor();
+			activeEditor = createEditor(factory);
+			if (activeEditor.setState) activeEditor.setState(state);
+			else activeEditor.setText(state.text);
+			editorFactory = factory;
+			mountEditor();
+			if (running) ui.requestRender();
+		},
+		start: () => {
+			if (running || stopped) return;
+			running = true;
+			startStartupTui(ui, settingsManager, () => running && !stopped);
+			ui.renderNow();
+		},
 		pause: () => {
 			if (!running || paused || stopped) return;
-			pausedState = captureEditorState(composer);
-			ui.removeChild(composer);
-			ui.setFocus(null);
+			pausedState = captureEditorState(activeEditor);
+			unmountEditor();
 			ui.stop({ preserveScreen: true });
 			running = false;
 			paused = true;
 		},
 		resume: () => {
 			if (!paused || stopped) return;
-			if (pausedState) {
-				composer.setState?.(pausedState);
-			}
+			if (pausedState) activeEditor.setState?.(pausedState);
 			ui.clear();
-			ui.addChild(composer);
-			ui.setFocus(composer);
+			mountEditor();
 			running = true;
 			paused = false;
 			startStartupTui(ui, settingsManager, () => running && !stopped);
@@ -280,22 +342,21 @@ export function createStartupComposer(
 		},
 		stop: (stopOptions) => {
 			if (running || paused) {
-				ui.removeChild(composer);
-				ui.setFocus(null);
+				unmountEditor();
 				ui.stop(stopOptions);
 				running = false;
 			}
+			removeInputListener();
 			stopped = true;
 			paused = false;
 			pausedState = undefined;
-			if (stopOptions?.preserveScreen !== true) {
-				terminal.clearScreen();
-			}
+			if (stopOptions?.preserveScreen !== true) terminal.clearScreen();
 		},
 		isRunning: () => running,
 		isCancelled: () => cancelled,
 	};
 
+	if (autoStart) session.start();
 	return session;
 }
 
