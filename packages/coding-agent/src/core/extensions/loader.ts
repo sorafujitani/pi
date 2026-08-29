@@ -315,6 +315,11 @@ function createExtensionAPI(
 			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
 		},
 
+		registerStartupEditor(factory): void {
+			assertActive();
+			extension.startupEditorFactory = factory;
+		},
+
 		registerFlag(
 			name: string,
 			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },

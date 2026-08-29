@@ -1120,6 +1120,7 @@ export interface ContextEventResult {
 	messages?: AgentMessage[];
 }
 
+// pi-lens-ignore: ast-grep:no-unknown-laundering
 export type BeforeProviderRequestEventResult = unknown;
 
 export interface ToolCallEventResult {
@@ -1325,6 +1326,9 @@ export interface ExtensionAPI {
 		},
 	): void;
 
+	/** Register an editor used for the first startup composer frame. Last registration wins. */
+	registerStartupEditor(factory: EditorFactory): void;
+
 	/** Register a CLI flag. */
 	registerFlag(
 		name: string,
@@ -1442,7 +1446,6 @@ export interface ExtensionAPI {
 	 * // Register a new provider with custom models
 	 * pi.registerProvider("my-proxy", {
 	 *   baseUrl: "https://proxy.example.com",
-	 *   apiKey: "$PROXY_API_KEY",
 	 *   api: "anthropic-messages",
 	 *   models: [
 	 *     {
@@ -1769,6 +1772,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Editor rendered while the full session runtime is still loading. */
+	startupEditorFactory?: EditorFactory;
 }
 
 /** Result of loading extensions. */
